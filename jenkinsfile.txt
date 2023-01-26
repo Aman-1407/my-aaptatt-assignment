@@ -1,0 +1,73 @@
+pipeline {
+    agent any
+    triggers {
+        pollSCM 'H/5 * * * *'
+    }
+    stages {
+        stage('Pull Code') {
+            steps {
+                git 'https://github.com/TeamAaptatt/Aaptatt-hiring-assignment.git'
+            }
+        }
+        stage('Build Application') {
+            steps {
+                sh 'mvn clean install'
+            }
+        }
+        stage('Create Docker Image and push') {
+            steps {
+                sh 'sudo -S docker build -t aaptatt-app .'
+                withCredentials([usernamePassword(credentialsId: 'dockerhub_credentials', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USERNAME')]) 
+                {
+                sh 'sudo docker tag aaptatt-app:latest aman1407/aaptatt-app:latest'    
+                sh "sudo -S docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD"
+                sh 'sudo docker push aman1407/aaptatt-app:latest'
+            }
+        }
+        }
+        stage('Deploy to Cloud VM') {
+            steps {
+                script {
+                    // Run the EC2 instance and store the output (instance ID) in a variable
+                    withAWS(credentials: 'AWS_REGION', region: 'us-east-1')
+                    {    
+                    def instanceId = sh(
+                        returnStdout: true,
+                        script:'''
+                    export IMAGE_ID=ami-0b5eea76982371e91
+                    export INSTANCE_TYPE=t2.micro
+                    export SECURITY_GROUP=sg-0339b8b275b4e0eca
+                    export KEY_NAME=aaptatt-key
+                    aws ec2 run-instances --image-id $IMAGE_ID --count 1 --instance-type $INSTANCE_TYPE --region ${AWS_REGION} --security-group-ids $SECURITY_GROUP --key-name $KEY_NAME --query "Instances[0].InstanceId" --output text
+                    ''').trim()
+                    // Print the instance ID
+                    echo "Instance ID: ${instanceId}"
+                    }
+                    withAWS(credentials: 'AWS_REGION', region: 'us-east-1'){
+                    sshagent(credentials: ['aaptatt-key']){
+                    sh 'instancePublicIp="$(aws ec2 describe-instances --instance-ids ${instanceId} --query "Reservations[*].Instances[*].PublicIpAddress" --region ${AWS_REGION} --output text)"'
+                    sh 'sudo ssh -v -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "sudo yum update -y && sudo amazon-linux-extras install docker"'
+                    sh 'sudo ssh -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "sudo service docker start && sudo usermod -a -G docker ec2-user"'
+                    sh 'sudo ssh -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "docker pull aman1407/aaptatt-app:latest"'
+                    sh 'sudo ssh -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "docker run -p 80:8080 -d aman1407/aaptatt-app:latest"'
+                    }}
+                } }   
+                
+            }
+        stage('Reverse proxy with nginx') {
+            steps {
+                script {
+                    // Add the SSH key to the ssh-agent
+                    withAWS(credentials: 'AWS_REGION', region: 'us-east-1'){
+                    sshagent(credentials: ['aaptatt-key']){
+                        // SSH to the instance
+                        sh 'ssh -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "sudo yum install -y nginx"'
+                        sh 'ssh -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "sudo echo "server { listen 80; location / { proxy_pass http://localhost:8080; } }" > /etc/nginx/nginx.conf"'
+                        sh 'ssh -i /var/lib/jenkins/Downloads/aaptatt-key.pem ec2-user@ec2-${instancePublicIp}.compute-1.amazonaws.com "sudo service nginx start"'
+                        
+                    }
+                }}
+            }
+        }
+    }
+}
