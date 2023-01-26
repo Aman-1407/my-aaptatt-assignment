@@ -1,0 +1,5 @@
+FROM openjdk:8-jdk-alpine
+COPY /target/sparkjava-hello-world-1.0.war /src/main/webapp/
+COPY /target/sparkjava-hello-world-1.0.war /apache-tomcat-8.0.53/webapps/
+RUN ./apache-tomcat-8.0.53/bin/startup.sh
+CMD [java,-jar,/sparkjava-hello-world-1.0.war]
